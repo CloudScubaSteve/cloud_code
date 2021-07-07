@@ -1,0 +1,159 @@
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Custom Resource
+Parameters:
+  pMaintenanceOu:
+    Type: String
+  pSnsTopicArn:
+    Type: String
+Conditions:
+  cSnsTopic: !Not [ !Equals [ !Ref pSnsTopicArn, "" ] ]
+Resources:
+  # https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-statemachine.html
+  rMaintenanceOuMonitorStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: Maintenance_OU_Monitor
+      Definition:
+        StartAt: Get Accounts
+        States:
+          Accounts in OU?:
+            Choices:
+            - Variable: "$.Payload.TotalAccounts.Count"
+              NumericEquals: 0
+              Next: No Accounts in OU
+            Default: Wait 15 Minutes
+            Type: Choice
+          Get Accounts:
+            Next: Accounts in OU?
+            Parameters:
+              FunctionName: !Ref rMaintenanceOuMonitorFn
+              Payload.$: "$"
+            Resource: arn:aws:states:::lambda:invoke
+            Retry:
+            - BackoffRate: 2
+              ErrorEquals:
+              - Lambda.ServiceException
+              - Lambda.AWSLambdaException
+              - Lambda.SdkClientException
+              IntervalSeconds: 2
+              MaxAttempts: 6
+            - ErrorEquals:
+              - States.ALL
+              MaxAttempts: 3
+            Type: Task
+            TimeoutSeconds: 60
+          Wait 15 Minutes:
+            Next: Get Accounts
+            Seconds: 900
+            Type: Wait
+          No Accounts in OU:
+            Type: Succeed
+      Events:
+        AccountMoved:
+          Type: EventBridgeRule
+          Properties:
+            Pattern: 
+              source:
+                - aws.organizations
+              detail-type:
+                - "AWS API Call via CloudTrail"
+              detail:
+                eventSource: 
+                  - organizations.amazonaws.com
+                eventName:
+                  - MoveAccount
+                requestParameters:
+                  destinationParentId:
+                    - !Ref pMaintenanceOu
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource:
+            - !GetAtt rMaintenanceOuMonitorFn.Arn
+          - Effect: Allow
+            Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+            - xray:GetSamplingRules
+            - xray:GetSamplingTargets
+            Resource:
+            - '*'
+      Tracing:
+        Enabled: True
+
+  # https://aws.amazon.com/premiumsupport/knowledge-center/lambda-sam-template-permissions/
+  # ----------------------
+  # MaintenanceOuMonitorFn
+  # ----------------------
+  rMaintenanceOuMonitorFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: main.lambda_handler
+      Runtime: python3.8
+      FunctionName: MaintenanceOuMonitorFn
+      Description: This function will check if any accounts exist in Maintenance OU, and publish Cloudwatch Metric if more than 0.
+      Timeout: 90
+      CodeUri: MaintenanceOuMonitorFn/src
+      Environment:
+        Variables:
+          MAINTENANCE_OU: !Ref pMaintenanceOu
+      Policies:
+        - arn:aws:iam::aws:policy/AWSOrganizationsReadOnlyAccess
+        - Statement:
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: '*'
+
+  rMaintenanceOuMonitorFnLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${rMaintenanceOuMonitorFn}"
+      RetentionInDays: 7
+
+  # Send alert every 15 min if account(s) in Maintenance OU
+  rFailureNotificationEventAlarm:
+    Condition: cSnsTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties: 
+      AlarmActions: 
+        - !Ref pSnsTopicArn
+      AlarmDescription: Monitor IAM Password Policy Function for failures
+      AlarmName: MaintenanceAccountsFail
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 1
+      EvaluationPeriods: 1
+      MetricName: Count
+      Namespace: MaintenanceOU
+      Dimensions:
+        -
+          Name: MaintenanceAccounts
+          Value: Total
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+  
+  # Send OK alert when no accounts in Maintenance OU
+  rSuccessNotificationEventAlarm:
+    Condition: cSnsTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties: 
+      OKActions: 
+        - !Ref pSnsTopicArn
+      AlarmDescription: Monitor IAM Password Policy Function for failures
+      AlarmName: MaintenanceAccountsOK
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 1
+      EvaluationPeriods: 1
+      MetricName: Count
+      Namespace: MaintenanceOU
+      Dimensions:
+        -
+          Name: MaintenanceAccounts
+          Value: Total
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: ignore

@@ -1,2 +1,2 @@
 # cloud_code
-Sample Cloud Code
+Sample Cloud Code for AWS

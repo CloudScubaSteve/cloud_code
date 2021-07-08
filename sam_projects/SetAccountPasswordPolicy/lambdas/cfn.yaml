@@ -1,0 +1,80 @@
+Transform: "AWS::Serverless-2016-10-31"
+Description: Custom Resources to extend Control Tower account vending machine functionality(SAM)
+Parameters:
+  ChatopsSnsTopicArn:
+    Type: String
+Resources:
+  rCTESetAccountPasswordPolicyFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: main.lambda_handler
+      Runtime: python3.7
+      FunctionName: SetAccountPasswordPolicy
+      Description: This function will ensure IAM Password Policy is set in target account(s).
+      Timeout: 900
+      CodeUri: SetAccountPasswordPolicy/src
+      Events:
+        AccountCreated:
+          Type: EventBridgeRule
+          Properties:
+            Pattern: 
+              source:
+                - controltower.amazonaws.com
+              detail-type:
+                - "AWS Service Event via CloudTrail"
+              detail:
+                eventName:
+                  - CreateManagedAccount
+                  - UpdateManagedAccount
+                serviceEventDetails:
+                  createManagedAccountStatus:
+                    state:
+                      - SUCCEEDED
+        MonthlyEnforcement:
+          Type: Schedule
+          Properties:
+            Name: IAMPasswordPolicySchedule
+            Schedule: "cron(0 0 ? * 1L *)"
+      Policies:
+        - CloudWatchPutMetricPolicy: {}
+        - 'arn:aws:iam::aws:policy/AWSOrganizationsReadOnlyAccess'
+        - Statement:
+            -
+              Effect: Allow
+              Action: sts:AssumeRole
+              Resource: arn:aws:iam::*:role/AWSControlTowerExecution
+
+  rCTESetAccountPasswordPolicyFnPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt rCTESetAccountPasswordPolicyFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: cloudformation.amazonaws.com
+
+  rCTESetAccountPasswordPolicyFnLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${rCTESetAccountPasswordPolicyFn}"
+      RetentionInDays: 7
+
+  # Monitor for failures
+  rNotificationEventAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties: 
+      AlarmActions: 
+        - !Ref ChatopsSnsTopicArn
+      AlarmDescription: Monitor IAM Password Policy Function for failures
+      AlarmName: IAMPasswordPolicyFailure
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 1
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        -
+          Name: "FunctionName"
+          Value: !Ref rCTESetAccountPasswordPolicyFn
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching

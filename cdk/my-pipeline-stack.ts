@@ -27,3 +27,13 @@ const sourceAction = new codepipelineActions.CodeStarConnectionsSourceAction({
   output: sourceOutput,
   connectionArn: githubConnection.attrConnectionArn
 });
+
+
+const pipeline = new codepipeline.Pipeline(this, 'MyPipeline', {
+  stages: [
+    {
+      stageName: 'Source',
+      actions: [sourceAction],
+    }
+  ],
+});
